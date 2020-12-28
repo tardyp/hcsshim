@@ -41,7 +41,6 @@ func newClonedExec(
 		state:       shimExecStateCreated,
 		exitStatus:  255, // By design for non-exited process status.
 		exited:      make(chan struct{}),
-		isTemplate:  false,
 	}
 
 	ce := &clonedExec{

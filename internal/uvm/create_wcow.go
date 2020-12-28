@@ -302,6 +302,7 @@ func CreateWCOW(ctx context.Context, opts *OptionsWCOW) (_ *UtilityVM, err error
 			nics: make(map[string]*nicInfo),
 		}
 		uvm.IsClone = true
+		uvm.TemplateID = opts.TemplateConfig.UVMID
 	}
 
 	// Add appropriate VSMB share options if this UVM needs to be saved as a template

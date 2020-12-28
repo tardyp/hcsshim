@@ -418,9 +418,14 @@ func handleCloneAnnotations(ctx context.Context, a map[string]string, wopts *uvm
 	wopts.IsTemplate = parseAnnotationsBool(ctx, a, annotationSaveAsTemplate, false)
 	templateID := parseAnnotationsString(a, annotationTemplateID, "")
 	if templateID != "" {
-		wopts.TemplateConfig, err = clone.FetchTemplateConfig(ctx, templateID)
+		tc, err := clone.FetchTemplateConfig(ctx, templateID)
 		if err != nil {
 			return err
+		}
+		wopts.TemplateConfig = &uvm.UVMTemplateConfig{
+			UVMID:      tc.TemplateUVMID,
+			CreateOpts: tc.TemplateUVMCreateOpts,
+			Resources:  tc.TemplateUVMResources,
 		}
 		wopts.IsClone = true
 	}

@@ -163,14 +163,16 @@ func newHcsTask(
 	}
 
 	ht := &hcsTask{
-		events:   events,
-		id:       req.ID,
-		isWCOW:   oci.IsWCOW(s),
-		c:        system,
-		cr:       resources,
-		ownsHost: ownsParent,
-		host:     parent,
-		closed:   make(chan struct{}),
+		events:     events,
+		id:         req.ID,
+		isWCOW:     oci.IsWCOW(s),
+		c:          system,
+		cr:         resources,
+		ownsHost:   ownsParent,
+		host:       parent,
+		closed:     make(chan struct{}),
+		taskSpec:   s,
+		isTemplate: isTemplate,
 	}
 	ht.init = newHcsExec(
 		ctx,
@@ -182,8 +184,7 @@ func newHcsTask(
 		req.Bundle,
 		ht.isWCOW,
 		s.Process,
-		io,
-		isTemplate)
+		io)
 
 	if parent != nil {
 		// We have a parent UVM. Listen for its exit and forcibly close this
@@ -257,15 +258,8 @@ func newClonedHcsTask(
 		netNS = s.Windows.Network.NetworkNamespace
 	}
 
-	// Since this is a cloned task there is no need to actually add the layers
-	// that are specified in the spec (these resources must have already
-	// been allocated at the time of UVM cloning). Remove these resources from
-	// the spec here.
-	// Similarly, use the templateid as the ID of the container here because that's
-	// the ID of this container inside the UVM.
-	layerFolders := s.Windows.LayerFolders
-	s.Windows.LayerFolders = []string{}
-
+	// This is a cloned task. Use the templateid as the ID of the container here
+	// because that's the ID of this container inside the UVM.
 	opts := hcsoci.CreateOptions{
 		ID:               templateID,
 		Owner:            owner,
@@ -277,7 +271,6 @@ func newClonedHcsTask(
 	if err != nil {
 		return nil, err
 	}
-	s.Windows.LayerFolders = layerFolders
 
 	ht := &hcsTask{
 		events:     events,
@@ -289,6 +282,8 @@ func newClonedHcsTask(
 		host:       parent,
 		closed:     make(chan struct{}),
 		templateID: templateID,
+		taskSpec:   s,
+		isTemplate: false,
 	}
 	ht.init = newClonedExec(
 		ctx,
@@ -396,6 +391,14 @@ type hcsTask struct {
 	// is sent to the GCS must actually use templateID to reference this container.
 	// A non-empty templateID specifies that this task was cloned.
 	templateID string
+
+	// if isTemplate is true then this container will be saved as a template as soon
+	// as its init process exits. Note: templateID and isTemplate are mutually exclusive.
+	// i.e isTemplate can not be true when templateID is not empty.
+	isTemplate bool
+
+	// taskSpec represents the spec/configuration for this task.
+	taskSpec *specs.Spec
 }
 
 func (ht *hcsTask) ID() string {
@@ -420,7 +423,7 @@ func (ht *hcsTask) CreateExec(ctx context.Context, req *task.ExecProcessRequest,
 	if err != nil {
 		return err
 	}
-	he := newHcsExec(ctx, ht.events, ht.id, ht.host, ht.c, req.ExecID, ht.init.Status().Bundle, ht.isWCOW, spec, io, false)
+	he := newHcsExec(ctx, ht.events, ht.id, ht.host, ht.c, req.ExecID, ht.init.Status().Bundle, ht.isWCOW, spec, io)
 	ht.execs.Store(req.ExecID, he)
 
 	// Publish the created event
@@ -593,6 +596,13 @@ func (ht *hcsTask) waitInitExit(destroyContainer bool) {
 	} else {
 		// Close the container's host, but do not close or terminate the container itself
 		ht.closeHost(ctx)
+	}
+
+	if ht.isTemplate {
+		// Save the host as a template
+		if err := saveAsTemplate(ctx, ht); err != nil {
+			log.G(ctx).WithError(err).Error("failed to save as template")
+		}
 	}
 }
 

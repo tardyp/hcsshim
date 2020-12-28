@@ -14,26 +14,36 @@ import (
 // before saving it.
 // Similar to the NIC scenario we do not want to create clones from a template with an
 // active GCS connection so close the GCS connection too.
-func saveAsTemplate(ctx context.Context, host *uvm.UtilityVM) (err error) {
-	if err = host.RemoveAllNICs(ctx); err != nil {
-		return err
-	}
-
-	if err = host.CloseGCSConnection(); err != nil {
-		return err
-	}
-
+func saveAsTemplate(ctx context.Context, templateTask *hcsTask) (err error) {
 	var utc *uvm.UVMTemplateConfig
-	utc, err = host.GenerateTemplateConfig()
+	var templateConfig *clone.TemplateConfig
+
+	if err = templateTask.host.RemoveAllNICs(ctx); err != nil {
+		return err
+	}
+
+	if err = templateTask.host.CloseGCSConnection(); err != nil {
+		return err
+	}
+
+	utc, err = templateTask.host.GenerateTemplateConfig()
 	if err != nil {
 		return err
 	}
 
-	if err = clone.SaveTemplateConfig(ctx, utc); err != nil {
+	templateConfig = &clone.TemplateConfig{
+		TemplateUVMID:         utc.UVMID,
+		TemplateUVMResources:  utc.Resources,
+		TemplateUVMCreateOpts: utc.CreateOpts,
+		TemplateContainerID:   templateTask.id,
+		TemplateContainerSepc: *templateTask.taskSpec,
+	}
+
+	if err = clone.SaveTemplateConfig(ctx, templateConfig); err != nil {
 		return err
 	}
 
-	if err = host.SaveAsTemplate(ctx); err != nil {
+	if err = templateTask.host.SaveAsTemplate(ctx); err != nil {
 		return err
 	}
 	return nil

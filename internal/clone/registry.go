@@ -8,12 +8,31 @@ import (
 
 	"github.com/Microsoft/hcsshim/internal/regstate"
 	"github.com/Microsoft/hcsshim/internal/uvm"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
 const (
-	configRoot = "LateClone"
-	configKey  = "UVMConfig"
+	configRoot                           = "LateClone"
+	configKey                            = "UVMConfig"
+	templateConfigCurrentSerialVersionID = 1
 )
+
+// TemplateConfig struct maintains all of the information about a template.  This includes
+// the information for both the template container and the template UVM.  This struct is
+// serialized and stored in the registry and hence is version controlled.
+// Note: Update the `templateConfigCurrentSerialVersionID` when this structure definition
+// is changed.
+type TemplateConfig struct {
+	SerialVersionID       uint32
+	TemplateUVMID         string
+	TemplateUVMResources  []uvm.Cloneable
+	TemplateUVMCreateOpts uvm.OptionsWCOW
+	TemplateContainerID   string
+	// Below we store the container spec for the template container so that when
+	// cloning containers we can verify that a different spec is not provided for the
+	// cloned container.
+	TemplateContainerSepc specs.Spec
+}
 
 // When encoding interfaces gob requires us to register the struct types that we will be
 // using under those interfaces. This registration needs to happen on both sides i.e the
@@ -26,25 +45,25 @@ func init() {
 	gob.Register(&uvm.SCSIMount{})
 }
 
-func encodeTemplateConfig(utc *uvm.UVMTemplateConfig) ([]byte, error) {
+func encodeTemplateConfig(templateConfig *TemplateConfig) ([]byte, error) {
 	var buf bytes.Buffer
 
 	encoder := gob.NewEncoder(&buf)
-	if err := encoder.Encode(utc); err != nil {
+	if err := encoder.Encode(templateConfig); err != nil {
 		return nil, fmt.Errorf("error while encoding template config: %s", err)
 	}
 	return buf.Bytes(), nil
 }
 
-func decodeTemplateConfig(encodedBytes []byte) (*uvm.UVMTemplateConfig, error) {
-	var utc uvm.UVMTemplateConfig
+func decodeTemplateConfig(encodedBytes []byte) (*TemplateConfig, error) {
+	var templateConfig TemplateConfig
 
 	reader := bytes.NewReader(encodedBytes)
 	decoder := gob.NewDecoder(reader)
-	if err := decoder.Decode(&utc); err != nil {
+	if err := decoder.Decode(&templateConfig); err != nil {
 		return nil, fmt.Errorf("error while decoding template config: %s", err)
 	}
-	return &utc, nil
+	return &templateConfig, nil
 }
 
 // loadPersistedUVMConfig loads a persisted config from the registry that matches the given ID
@@ -101,18 +120,21 @@ func removePersistedUVMConfig(id string) error {
 
 // Saves all the information required to create a clone from the template
 // of this container into the registry.
-func SaveTemplateConfig(ctx context.Context, utc *uvm.UVMTemplateConfig) error {
-	_, err := loadPersistedUVMConfig(utc.UVMID)
+func SaveTemplateConfig(ctx context.Context, templateConfig *TemplateConfig) error {
+	_, err := loadPersistedUVMConfig(templateConfig.TemplateUVMID)
 	if !regstate.IsNotFoundError(err) {
-		return fmt.Errorf("parent VM(ID: %s) config shouldn't exit in registry (%s)", utc.UVMID, err)
+		return fmt.Errorf("parent VM(ID: %s) config shouldn't exit in registry (%s)", templateConfig.TemplateUVMID, err)
 	}
 
-	encodedBytes, err := encodeTemplateConfig(utc)
+	// set the serial version before encoding
+	templateConfig.SerialVersionID = templateConfigCurrentSerialVersionID
+
+	encodedBytes, err := encodeTemplateConfig(templateConfig)
 	if err != nil {
 		return fmt.Errorf("failed to encode template config: %s", err)
 	}
 
-	if err := storePersistedUVMConfig(utc.UVMID, encodedBytes); err != nil {
+	if err := storePersistedUVMConfig(templateConfig.TemplateUVMID, encodedBytes); err != nil {
 		return fmt.Errorf("failed to store encoded template config: %s", err)
 	}
 
@@ -127,15 +149,20 @@ func RemoveSavedTemplateConfig(id string) error {
 }
 
 // Retrieves the UVMTemplateConfig for the template with given ID from the registry.
-func FetchTemplateConfig(ctx context.Context, id string) (*uvm.UVMTemplateConfig, error) {
+func FetchTemplateConfig(ctx context.Context, id string) (*TemplateConfig, error) {
 	encodedBytes, err := loadPersistedUVMConfig(id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch encoded template config: %s", err)
 	}
 
-	utc, err := decodeTemplateConfig(encodedBytes)
+	templateConfig, err := decodeTemplateConfig(encodedBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode template config: %s", err)
 	}
-	return utc, nil
+
+	if templateConfig.SerialVersionID != templateConfigCurrentSerialVersionID {
+		return nil, fmt.Errorf("serialized version of TemplateConfig: %d doesn't match with the current version: %d", templateConfig.SerialVersionID, templateConfigCurrentSerialVersionID)
+	}
+
+	return templateConfig, nil
 }

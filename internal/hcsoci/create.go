@@ -9,9 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 
 	"github.com/Microsoft/go-winio/pkg/guid"
+	"github.com/Microsoft/hcsshim/internal/clone"
 	"github.com/Microsoft/hcsshim/internal/cow"
 	"github.com/Microsoft/hcsshim/internal/hcs"
 	"github.com/Microsoft/hcsshim/internal/log"
@@ -70,24 +70,111 @@ type createOptionsInternal struct {
 	templateID             string                                   // Template ID of the template from which this container is being cloned
 }
 
-func validateContainerConfig(createOptions *CreateOptions) error {
-	if createOptions.Spec == nil {
+// compares two slices of strings and returns true if they are same, returns false otherwise.
+// The elements in the slices don't have to be in the same order for them to be equal.
+func cmpSlices(s1, s2 []string) bool {
+	equal := (len(s1) == len(s2))
+	for i := 0; equal && i < len(s1); i++ {
+		found := false
+		for j := 0; !found && j < len(s2); j++ {
+			found = (s1[i] == s2[j])
+		}
+		equal = equal && found
+	}
+	return equal
+}
+
+// Compares to mount structs and returns true if they are equal, returns false otherwise.
+func compareMounts(m1, m2 specs.Mount) bool {
+	return cmpSlices(m1.Options, m2.Options) && (m1.Source == m2.Source) && (m1.Destination == m2.Destination) && (m1.Type == m2.Type)
+}
+
+// verifyCloneContainerSpecs compares the container creation spec provided during the template container
+// creation and the spec provided during cloned container creation and checks that all the fields match
+// (except for the certain fields that are allowed to be different).
+func verifyCloneContainerSpecs(templateSpec, cloneSpec *specs.Spec) error {
+	// Following fields can be different in the template and clone specs.
+	// 1. Process
+	// 2. Annotations - Only the template/cloning related annotations can be different.
+	// 3. Windows.LayerFolders - Only the last i.e scratch layer can be different.
+
+	if templateSpec.Version != cloneSpec.Version {
+		return fmt.Errorf("OCI Runtime Spec version of template (%s) doesn't match with the Spec version of clone (%s)", templateSpec.Version, cloneSpec.Version)
+	}
+
+	// for annotations check that the values of memory & cpu annotations are same
+	if templateSpec.Annotations[oci.AnnotationContainerMemorySizeInMB] != cloneSpec.Annotations[oci.AnnotationContainerMemorySizeInMB] {
+		return fmt.Errorf("memory size limit for template and clone containers can not be different")
+	}
+	if templateSpec.Annotations[oci.AnnotationContainerProcessorCount] != cloneSpec.Annotations[oci.AnnotationContainerProcessorCount] {
+		return fmt.Errorf("processor count for template and clone containers can not be different")
+	}
+	if templateSpec.Annotations[oci.AnnotationContainerProcessorLimit] != cloneSpec.Annotations[oci.AnnotationContainerProcessorLimit] {
+		return fmt.Errorf("processor limit for template and clone containers can not be different")
+	}
+
+	// LayerFolders should be identical except for the last element.
+	if !cmpSlices(templateSpec.Windows.LayerFolders[:len(templateSpec.Windows.LayerFolders)-1], cloneSpec.Windows.LayerFolders[:len(cloneSpec.Windows.LayerFolders)-1]) {
+		return fmt.Errorf("layers provided for template container and clone container don't match. Check the image specified in container config")
+	}
+
+	if templateSpec.Windows.HyperV != cloneSpec.Windows.HyperV {
+		return fmt.Errorf("HyperV spec for template and clone containers can not be different")
+	}
+
+	if templateSpec.Windows.Network.AllowUnqualifiedDNSQuery != cloneSpec.Windows.Network.AllowUnqualifiedDNSQuery {
+		return fmt.Errorf("different values for allow unqualified DNS query can not be provided for template and clones")
+	}
+	if templateSpec.Windows.Network.NetworkSharedContainerName != cloneSpec.Windows.Network.NetworkSharedContainerName {
+		return fmt.Errorf("different network shared name can not be provided for template and clones")
+	}
+	if !cmpSlices(templateSpec.Windows.Network.DNSSearchList, cloneSpec.Windows.Network.DNSSearchList) {
+		return fmt.Errorf("different DNS search list can not be provided for template and clones")
+	}
+	return nil
+}
+
+func validateContainerConfig(ctx context.Context, coi *createOptionsInternal) error {
+	if coi.Spec == nil {
 		return fmt.Errorf("Spec must be supplied")
 	}
 
-	if createOptions.HostingSystem != nil && createOptions.HostingSystem.IsTemplate {
-		// check that none of the user specified mounts are writeable
-		for _, mount := range createOptions.Spec.Mounts {
-			isReadOnly := false
-			for _, o := range mount.Options {
-				if strings.ToLower(o) == "ro" {
-					isReadOnly = true
-					break
-				}
-			}
-			if !isReadOnly {
-				return fmt.Errorf("mount %v is not read-only. Template containers can not have non read-only mounts", mount)
-			}
+	if coi.HostingSystem != nil && coi.HostingSystem.IsTemplate && !coi.isTemplate {
+		return fmt.Errorf("only a template container can be created inside a template pod. Any other combination is not valid")
+	}
+
+	if coi.HostingSystem != nil && coi.templateID != "" && !coi.HostingSystem.IsClone {
+		return fmt.Errorf("A container can not be cloned inside a non cloned POD")
+	}
+
+	if coi.templateID != "" {
+		// verify that the configurations provided for the template for
+		// this clone are same.
+		tc, err := clone.FetchTemplateConfig(ctx, coi.HostingSystem.TemplateID)
+		if err != nil {
+			return fmt.Errorf("config validation failed : %s", err)
+		}
+		if err := verifyCloneContainerSpecs(&tc.TemplateContainerSepc, coi.Spec); err != nil {
+			return err
+		}
+	}
+
+	if coi.HostingSystem != nil && coi.HostingSystem.IsTemplate {
+		if len(coi.Spec.Windows.Devices) != 0 {
+			return fmt.Errorf("Mapped Devices are not supported for template containers")
+		}
+
+		if _, ok := coi.Spec.Windows.CredentialSpec.(string); ok {
+			return fmt.Errorf("gMSA specifications are not supported for template containers")
+		}
+
+		if coi.Spec.Windows.Servicing {
+			return fmt.Errorf("template containers can't be started in servicing mode")
+		}
+
+		// check that no mounts are specified.
+		if len(coi.Spec.Mounts) > 0 {
+			return fmt.Errorf("user specified mounts are not permitted for template containers")
 		}
 	}
 	return nil
@@ -169,14 +256,13 @@ func configureSandboxNetwork(ctx context.Context, coi *createOptionsInternal, r 
 // release the resources on failure, so that the client can make the necessary
 // call to release resources that have been allocated as part of calling this function.
 func CreateContainer(ctx context.Context, createOptions *CreateOptions) (_ cow.Container, _ *resources.Resources, err error) {
-
-	if err := validateContainerConfig(createOptions); err != nil {
-		return nil, nil, fmt.Errorf("container config validation failed: %s", err)
-	}
-
 	coi, err := initializeCreateOptions(ctx, createOptions)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if err := validateContainerConfig(ctx, coi); err != nil {
+		return nil, nil, fmt.Errorf("container config validation failed: %s", err)
 	}
 
 	r := resources.NewContainerResources(createOptions.ID)
@@ -280,6 +366,10 @@ func CreateContainer(ctx context.Context, createOptions *CreateOptions) (_ cow.C
 func CloneContainer(ctx context.Context, createOptions *CreateOptions) (_ cow.Container, _ *resources.Resources, err error) {
 	coi, err := initializeCreateOptions(ctx, createOptions)
 	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := validateContainerConfig(ctx, coi); err != nil {
 		return nil, nil, err
 	}
 

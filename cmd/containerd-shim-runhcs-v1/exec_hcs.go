@@ -49,8 +49,7 @@ func newHcsExec(
 	id, bundle string,
 	isWCOW bool,
 	spec *specs.Process,
-	io cmd.UpstreamIO,
-	isTemplate bool) shimExec {
+	io cmd.UpstreamIO) shimExec {
 	log.G(ctx).WithFields(logrus.Fields{
 		"tid":    tid,
 		"eid":    id, // Init exec ID is always same as Task ID
@@ -72,7 +71,6 @@ func newHcsExec(
 		state:       shimExecStateCreated,
 		exitStatus:  255, // By design for non-exited process status.
 		exited:      make(chan struct{}),
-		isTemplate:  isTemplate,
 	}
 	go he.waitForContainerExit()
 	return he
@@ -136,10 +134,6 @@ type hcsExec struct {
 	// exited is a wait block which waits async for the process to exit.
 	exited     chan struct{}
 	exitedOnce sync.Once
-
-	// if isTemplate is true then the container for which this is an init exec
-	// will be saved as a template as soon as this exec exits.
-	isTemplate bool
 }
 
 func (he *hcsExec) ID() string {
@@ -480,13 +474,6 @@ func (he *hcsExec) waitForExit() {
 	he.exitedOnce.Do(func() {
 		close(he.exited)
 	})
-
-	if he.isTemplate {
-		// Save the host as a template
-		if err = saveAsTemplate(ctx, he.host); err != nil {
-			log.G(ctx).WithError(err).Error("failed to save as template")
-		}
-	}
 }
 
 // waitForContainerExit waits for `he.c` to exit. Depending on the exec's state

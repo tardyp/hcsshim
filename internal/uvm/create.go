@@ -90,7 +90,7 @@ type Options struct {
 // compares the create opts used during template creation with the create opts
 // provided for clone creation. If they don't match (except for a few fields)
 // then clone creation is failed.
-func verifyCreateOpts(templateOpts, cloneOpts *OptionsWCOW) bool {
+func verifyCloneUvmCreateOpts(templateOpts, cloneOpts *OptionsWCOW) bool {
 	// Following fields can be different in the template and clone configurations.
 	// 1. the scratch layer path. i.e the last element of the LayerFolders path.
 	// 2. IsTemplate, IsClone and TemplateConfig variables.
@@ -154,7 +154,7 @@ func verifyOptions(ctx context.Context, options interface{}) error {
 		if len(opts.LayerFolders) < 2 {
 			return errors.New("at least 2 LayerFolders must be supplied")
 		}
-		if opts.IsClone && !verifyCreateOpts(&opts.TemplateConfig.CreateOpts, opts) {
+		if opts.IsClone && !verifyCloneUvmCreateOpts(&opts.TemplateConfig.CreateOpts, opts) {
 			return errors.New("clone configuration doesn't match with template configuration.")
 		}
 		if opts.IsClone && opts.TemplateConfig == nil {
